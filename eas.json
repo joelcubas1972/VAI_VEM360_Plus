@@ -10,7 +10,7 @@
     },
     "preview": {
       "distribution": "internal",
-      "command": "npm install --legacy-peer-deps"
+      "installCommand": "npm install --legacy-peer-deps"
     },
     "production": {
       "autoIncrement": true
