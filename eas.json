@@ -9,7 +9,10 @@
       "distribution": "internal"
     },
     "preview": {
-      "distribution": "internal"
+      "distribution": "internal",
+      "env": {
+        "NPM_LEGACY_PEER_DEPS": "1"
+      }
     },
     "production": {
       "autoIncrement": true
