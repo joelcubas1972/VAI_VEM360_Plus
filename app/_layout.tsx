@@ -1,38 +1,45 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useFonts } from 'expo-font';
 import { Stack, useRouter, useSegments } from 'expo-router';
+import * as SplashScreen from 'expo-splash-screen';
 import { onAuthStateChanged, User } from 'firebase/auth';
 import { doc, getDoc } from 'firebase/firestore';
 import React, { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, View } from 'react-native';
 import { auth, db } from '../src/services/firebaseConfig';
 
+// Evita que la splash screen se oculte automáticamente
+SplashScreen.preventAutoHideAsync();
+
 export default function RootLayout() {
+  // Cargar fuentes (OBLIGATORIO para íconos)
+  const [fontsLoaded] = useFonts({
+    // Las fuentes de @expo/vector-icons se cargan automáticamente
+  });
+
   const [user, setUser] = useState<User | null>(null);
   const [userRole, setUserRole] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [initialRoute, setInitialRoute] = useState<string>('welcome');
+  const [isNavigationReady, setIsNavigationReady] = useState(false);
 
   const router = useRouter();
   const segments = useSegments();
+  const navigationStarted = useRef(false);
 
-  // Controla que la navegación solo ocurra UNA VEZ
-  const navegacionCompletada = useRef(false);
-  const authProcesado = useRef(false);
+  // Marcar navegación lista después del primer render
+  useEffect(() => {
+    setIsNavigationReady(true);
+  }, []);
 
   useEffect(() => {
     const checkFirstTime = async () => {
       const hasSeenWelcome = await AsyncStorage.getItem('hasSeenWelcome');
       setInitialRoute(!hasSeenWelcome ? 'welcome' : 'login');
     };
-
     checkFirstTime();
   }, []);
 
   useEffect(() => {
-    // Evitar múltiples suscripciones
-    if (authProcesado.current) return;
-    authProcesado.current = true;
-
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
       console.log('🔥 Auth cambió:', firebaseUser?.email);
       setUser(firebaseUser);
@@ -65,52 +72,47 @@ export default function RootLayout() {
     return unsubscribe;
   }, []);
 
-  // useEffect SEPARADO para la navegación, con control de una sola vez
+  // EFECTO ÚNICO DE NAVEGACIÓN - SOLO CUANDO TODO ESTÉ LISTO
   useEffect(() => {
-    // No hacer nada si:
-    // - Todavía está cargando
-    // - Ya navegamos antes
-    // - No hay router listo
-    if (loading || navegacionCompletada.current || !router) return;
-
-    const inAuthGroup = segments[0] === '(auth)';
-
-    if (!user) {
-      // Usuario NO autenticado
-      if (!inAuthGroup) {
-        console.log('🚶 No usuario → redirect a', initialRoute);
-        navegacionCompletada.current = true;
-
-        // Pequeño timeout para asegurar que el navigator está listo
-        setTimeout(() => {
-          // Usar 'as any' para evitar error de TypeScript con rutas dinámicas
-          router.replace(`/(auth)/${initialRoute}` as any);
-        }, 100);
-      }
-    } else {
-      // Usuario SÍ autenticado
-      if (userRole === 'conductor') {
-        console.log('🚗 Es conductor → dashboard');
-        navegacionCompletada.current = true;
-        setTimeout(() => {
-          router.replace('/conductor/dashboard' as any);
-        }, 100);
-      } else if (userRole === 'usuario') {
-        console.log('👤 Es usuario → servicios (para elegir servicio)');
-        navegacionCompletada.current = true;
-        setTimeout(() => {
-          router.replace('/(tabs)/servicios' as any); 
-        }, 100);
-      }
+    if (!fontsLoaded || loading || !isNavigationReady || navigationStarted.current) {
+      return;
     }
-  }, [user, userRole, loading, initialRoute, segments]);
 
-  if (loading) {
-    return (
-      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
-        <ActivityIndicator size="large" color="#007AFF" />
-      </View>
-    );
+    const timer = setTimeout(() => {
+      if (navigationStarted.current) return;
+      
+      const inAuthGroup = segments[0] === '(auth)';
+      
+      if (!user) {
+        if (!inAuthGroup) {
+          console.log('🚶 No usuario →', initialRoute);
+          navigationStarted.current = true;
+          router.replace(`/(auth)/${initialRoute}` as any);
+        }
+      } else if (userRole === 'conductor') {
+        console.log('🚗 Conductor → dashboard');
+        navigationStarted.current = true;
+        router.replace('/conductor/dashboard' as any);
+      } else if (userRole === 'usuario') {
+        console.log('👤 Usuario → servicios');
+        navigationStarted.current = true;
+        router.replace('/(tabs)/servicios' as any);
+      }
+    }, 500);
+
+    return () => clearTimeout(timer);
+  }, [fontsLoaded, loading, isNavigationReady, user, userRole, initialRoute]);
+
+  // Ocultar splash screen cuando todo esté listo
+  useEffect(() => {
+    if (fontsLoaded && !loading) {
+      SplashScreen.hideAsync();
+    }
+  }, [fontsLoaded, loading]);
+
+  // Mostrar splash screen mientras carga
+  if (!fontsLoaded || loading) {
+    return null;
   }
 
   return (

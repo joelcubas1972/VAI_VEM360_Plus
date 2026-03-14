@@ -98,7 +98,7 @@ export default function ServiciosScreen() {
     setModalVisible(false);
     router.push({
       pathname: '/(tabs)/mapa',
-      params: { servicio: selectedService?.id }
+      params: selectedService ? { servicio: selectedService.id } : {}
     });
   };
 
