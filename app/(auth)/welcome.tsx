@@ -71,7 +71,7 @@ export default function WelcomeScreen() {
       const saved = await AsyncStorage.getItem('appLanguage');
       if (saved === 'es' || saved === 'pt') setLanguage(saved);
     })();
-  }, []);
+  }, [fadeAnim, scaleAnim]);
 
   const changeLanguage = async (lang: 'es' | 'pt') => {
     setLanguage(lang);

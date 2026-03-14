@@ -1,1 +1,0 @@
-export { sendEmailVerificationDev } from "./sendVerification";

@@ -2,19 +2,19 @@ import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import React, { useState } from 'react';
 import {
-    Modal,
-    SafeAreaView,
-    ScrollView,
-    StatusBar,
-    StyleSheet,
-    Text,
-    TouchableOpacity,
-    View
+  Modal,
+  SafeAreaView,
+  ScrollView,
+  StatusBar,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View
 } from 'react-native';
 
 const servicesList = [
   { 
-    id: 'taxi', 
+    id: 'Uber', 
     title: 'Taxi / Uber', 
     icon: 'car', 
     color: '#4CAF50',

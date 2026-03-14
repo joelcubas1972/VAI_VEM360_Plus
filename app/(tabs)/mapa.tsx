@@ -1,6 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
 import { router, useLocalSearchParams } from 'expo-router';
+import { addDoc, collection, doc, onSnapshot, query, where } from 'firebase/firestore';
 import React, { useEffect, useRef, useState } from 'react';
 import {
   Animated,
@@ -18,7 +19,7 @@ import {
 import MapView, { Marker, Polyline, PROVIDER_GOOGLE, Region } from 'react-native-maps';
 import MapViewDirections from 'react-native-maps-directions';
 import { useTranslation } from '../../src/i18n/useTranslation';
-import { auth } from '../../src/services/firebaseConfig';
+import { auth, db } from '../../src/services/firebaseConfig';
 
 const { width, height } = Dimensions.get('window');
 const GOOGLE_MAPS_APIKEY = 'AIzaSyCjnQrWBaAbchyIGaQGvIv9zd0wtjmrf9o';
@@ -35,18 +36,35 @@ const currencySymbols = {
   PYG: 'Gs',
   USD: 'US$',
 };
-
+const metodosPago = [
+  { id: 'efectivo', label: 'Efectivo', icon: '💰' },
+  { id: 'pix_br', label: 'Pix Brasilero', icon: '🇧🇷' },
+  { id: 'tarjeta_credito_br', label: 'Tarjeta crédito brasilera', icon: '💳' },
+  { id: 'tarjeta_debito_br', label: 'Tarjeta débito brasilera', icon: '💳' },
+  { id: 'tarjeta_credito_py', label: 'Tarjeta crédito paraguaya', icon: '🇵🇾' },
+  { id: 'tarjeta_debito_py', label: 'Tarjeta débito paraguaya', icon: '🇵🇾' },
+  { id: 'transferencia_py', label: 'Transferencia bancaria paraguaya', icon: '🏦' },
+  { id: 'giros_tigo', label: 'Giros (Tigo Money)', icon: '📱' },
+];
 export default function MapaScreen() {
   const { t, language } = useTranslation();
   const params = useLocalSearchParams();
   const mapRef = useRef<MapView>(null);
-  const servicioSeleccionado = params.servicio as string || 'taxi';
+  const servicioSeleccionado = params.servicio as string || 'Uber';
+  //console.log("🎯 Servicio recibido en mapa:", servicioSeleccionado);
+  // Helper para convertir hex a RGB (para transparencias)
+  const hexToRgb = (hex: string) => {
+    const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+    return result
+      ? `${parseInt(result[1], 16)}, ${parseInt(result[2], 16)}, ${parseInt(result[3], 16)}`
+      : '0, 122, 255';
+  };
 
   // Animaciones para la tarjeta moderna
   const pan = useRef(new Animated.ValueXY()).current;
   const scaleAnim = useRef(new Animated.Value(1)).current;
   const opacityAnim = useRef(new Animated.Value(1)).current;
-  
+
   const [cardVisible, setCardVisible] = useState(false);
   const [cardMinimized, setCardMinimized] = useState(false);
   const [cardContent, setCardContent] = useState<any>(null);
@@ -55,7 +73,7 @@ export default function MapaScreen() {
     PanResponder.create({
       onMoveShouldSetPanResponder: () => !cardMinimized,
       onPanResponderMove: Animated.event([null, { dx: pan.x, dy: pan.y }], { useNativeDriver: false }),
-      onPanResponderRelease: () => {},
+      onPanResponderRelease: () => { },
     })
   ).current;
 
@@ -68,9 +86,10 @@ export default function MapaScreen() {
   const [routeDuration, setRouteDuration] = useState(0);
   const [ridePrice, setRidePrice] = useState(0);
   const [selectedCurrency, setSelectedCurrency] = useState<'BRL' | 'PYG' | 'USD'>('BRL');
+  const [selectedMetodoPago, setSelectedMetodoPago] = useState('efectivo');
   const [availableRoutes, setAvailableRoutes] = useState<any[]>([]);
   const [selectedRouteIndex, setSelectedRouteIndex] = useState(0);
-  
+
   // Estados para la búsqueda
   const [buscandoConductor, setBuscandoConductor] = useState(false);
   const [conductorAsignado, setConductorAsignado] = useState<any>(null);
@@ -81,14 +100,9 @@ export default function MapaScreen() {
   const timeoutRef = useRef<any>(null);
   const cancelTimerRef = useRef<any>(null);
 
-  // Datos de ejemplo
-  const allNearbyCars = [
-    { id: 1, type: 'taxi', service: 'taxi', lat: -22.5327, lng: -55.7333, driver: 'Carlos', eta: 3, favorite: true, plate: 'ABC-123', rating: 4.8, disponible: true },
-    { id: 2, type: 'taxi', service: 'taxi', lat: -22.5340, lng: -55.7350, driver: 'Maria', eta: 5, favorite: false, plate: 'DEF-456', rating: 4.5, disponible: true },
-    { id: 3, type: 'taxi', service: 'taxi', lat: -22.5310, lng: -55.7320, driver: 'Juan', eta: 2, favorite: false, plate: 'GHI-789', rating: 4.9, disponible: true },
-  ];
-
-  const nearbyCars = allNearbyCars.filter(car => car.service === servicioSeleccionado);
+  // 🔥 NUEVO: Estado para conductores reales desde Firebase
+  const [conductoresReales, setConductoresReales] = useState<any[]>([]);
+  const [loadingConductores, setLoadingConductores] = useState(true);
 
   const getServiceInfo = () => {
     const info: any = {
@@ -122,6 +136,47 @@ export default function MapaScreen() {
       });
     })();
   }, []);
+
+  useEffect(() => {
+    console.log(`🔍 Buscando conductores para servicio: ${servicioSeleccionado}`);
+
+    const q = query(
+      collection(db, "conductores"),
+      where("servicio", "==", servicioSeleccionado),
+      where("disponible", "==", true)
+    );
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      console.log(`📊 Conductores encontrados para ${servicioSeleccionado}: ${snapshot.size}`);
+
+      const conductores = snapshot.docs.map(doc => {
+        const data = doc.data();
+
+        // Solo validamos que tenga ubicación, sin depender de region
+        if (!data.ubicacion?.latitud || !data.ubicacion?.longitud) return null;
+
+        return {
+          id: doc.id,
+          type: data.servicio,
+          service: data.servicio,
+          lat: data.ubicacion.latitud,
+          lng: data.ubicacion.longitud,
+          driver: `${data.nombre || ''} ${data.apellido || ''}`.trim() || 'Conductor',
+          plate: data.vehiculo?.matricula || 'ABC-123',
+          disponible: data.disponible,
+          marca: data.vehiculo?.marca || 'Toyota',
+          modelo: data.vehiculo?.modelo || 'Corolla',
+          color: data.vehiculo?.color || 'Blanco',
+        };
+      }).filter(c => c !== null);
+
+      console.log(`✅ Conductores en mapa: ${conductores.length}`);
+      setConductoresReales(conductores);
+      setLoadingConductores(false);
+    });
+
+    return () => unsubscribe();
+  }, [servicioSeleccionado]); // 👈 SOLO servicioSeleccionado como dependencia
 
   useEffect(() => {
     if (!params.destination) return;
@@ -165,7 +220,7 @@ export default function MapaScreen() {
     if (conductorAsignado) {
       setPuedeCancelar(true);
       setTiempoParaCancelar(30);
-      
+
       cancelTimerRef.current = setInterval(() => {
         setTiempoParaCancelar((prev) => {
           if (prev <= 1) {
@@ -221,7 +276,7 @@ export default function MapaScreen() {
     const nightMultiplier = (hour >= 22 || hour < 6) ? 1.3 : 1;
 
     const services: any = {
-      taxi: { base: 15, km: 1.5, min: 0.3 },
+      Uber: { base: 15, km: 1.5, min: 0.3 },
       uber_mujer: { base: 18, km: 1.8, min: 0.35 },
       mototaxi: { base: 10, km: 1.2, min: 0.2 },
       grua: { base: 30, km: 3.5, min: 0.5 },
@@ -230,7 +285,7 @@ export default function MapaScreen() {
       compra: { base: 12, km: 1.2, min: 0.15 }
     };
 
-    const service = services[servicioSeleccionado] || services.taxi;
+    const service = services[servicioSeleccionado] || services.Uber;
     let price = service.base + (distance * service.km) + (duration * service.min);
     price = price * nightMultiplier;
     return price;
@@ -268,8 +323,6 @@ export default function MapaScreen() {
       setRouteDistance(best.legs[0].distance.value / 1000);
       setRouteDuration(best.legs[0].duration.value / 60);
 
-      // 🚫 ELIMINADO: mapRef.current.fitToCoordinates - YA NO HACE ZOOM AUTOMÁTICO
-      
     } catch (e) {
       console.log(e);
     }
@@ -311,11 +364,11 @@ export default function MapaScreen() {
     const R = 6371;
     const dLat = (lat2 - lat1) * Math.PI / 180;
     const dLon = (lon2 - lon1) * Math.PI / 180;
-    const a = 
-      Math.sin(dLat/2) * Math.sin(dLat/2) +
-      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * 
-      Math.sin(dLon/2) * Math.sin(dLon/2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    const a =
+      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+      Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
     return R * c;
   };
 
@@ -330,7 +383,7 @@ export default function MapaScreen() {
     setCardVisible(true);
     setCardMinimized(false);
     pan.setValue({ x: 0, y: 0 });
-    
+
     Animated.parallel([
       Animated.spring(scaleAnim, { toValue: 1, useNativeDriver: true, friction: 8 }),
       Animated.timing(opacityAnim, { toValue: 1, duration: 300, useNativeDriver: true })
@@ -367,101 +420,172 @@ export default function MapaScreen() {
     }
   };
 
-  const buscarConductorAutomatico = () => {
-    if (!destination || nearbyCars.length === 0) {
+  const buscarConductorAutomatico = async () => {
+    console.log("🚀 USUARIO SOLICITANDO VIAJE");
+    console.log("  Destino:", destination);
+    console.log("  Conductores disponibles:", conductoresReales.length);
+    console.log("  Servicio:", servicioSeleccionado);
+
+    if (!destination || conductoresReales.length === 0) {
+      console.log("❌ Error: Sin destino o sin conductores");
       mostrarTarjeta("Error", "No hay conductores disponibles en este momento", 'error');
       return;
     }
 
     if (!region) {
+      console.log("❌ Error: Sin ubicación");
       mostrarTarjeta("Error", "No se pudo obtener tu ubicación", 'error');
       return;
     }
 
+    console.log("✅ Validaciones pasadas, iniciando búsqueda...");
     setBuscandoConductor(true);
     setConductorAsignado(null);
     setConductoresContactados([]);
 
-    const conductoresConDistancia = nearbyCars.map(conductor => {
-      const distancia = calcularDistancia(
-        region.latitude,
-        region.longitude,
-        conductor.lat,
-        conductor.lng
-      );
-      return {
-        ...conductor,
-        distanciaKm: distancia,
-        etaCalculado: Math.round(distancia * 2)
+    try {
+      const nuevoViaje = {
+        usuarioId: auth.currentUser?.uid,
+        usuarioNombre: auth.currentUser?.email,
+        origen: {
+          lat: region.latitude,
+          lng: region.longitude,
+          direccion: "Mi ubicación"
+        },
+        destino: {
+          lat: destination.latitude,
+          lng: destination.longitude,
+          direccion: "Destino"
+        },
+        tipo: [servicioSeleccionado],
+        estado: "pendiente",
+        precio: ridePrice || 25000,
+        monedaPago: selectedCurrency,
+        metodoPago: selectedMetodoPago,
+        distancia: routeDistance || 3.5,
+        tiempoEstimado: Math.round(routeDuration) || 5,
+        fecha: new Date(),
+        conductorId: null
       };
-    });
 
-    const conductoresOrdenados = conductoresConDistancia.sort((a, b) => a.distanciaKm - b.distanciaKm);
-    
-    let indiceActual = 0;
-    const TIEMPO_ESPERA = 7;
+      console.log("📝 Creando viaje:", nuevoViaje);
+      const docRef = await addDoc(collection(db, "viajes"), nuevoViaje);
+      console.log("✅ Viaje creado con ID:", docRef.id);
 
-    const contactarSiguienteConductor = () => {
-      if (indiceActual >= conductoresOrdenados.length) {
-        setBuscandoConductor(false);
-        mostrarTarjeta("Lo sentimos", "No hay conductores disponibles", 'error');
-        return;
-      }
+      // CONTINUAR CON LA LÓGICA DE CONTACTAR CONDUCTORES
+      const conductoresConDistancia = conductoresReales.map(conductor => {
+        const distancia = calcularDistancia(
+          region.latitude,
+          region.longitude,
+          conductor.lat,
+          conductor.lng
+        );
+        return {
+          ...conductor,
+          distanciaKm: distancia,
+          etaCalculado: Math.round(distancia * 2)
+        };
+      });
 
-      const conductor = conductoresOrdenados[indiceActual];
-      
-      setConductoresContactados(prev => [...prev, conductor.id]);
-      
-      mostrarTarjeta(
-        "🔄 Contactando",
-        `${conductor.driver} (${indiceActual + 1}/${conductoresOrdenados.length})`,
-        'contactando',
-        conductor
-      );
+      const conductoresOrdenados = conductoresConDistancia.sort((a, b) => a.distanciaKm - b.distanciaKm);
 
-      setTiempoRestante(TIEMPO_ESPERA);
+      let indiceActual = 0;
+      const TIEMPO_ESPERA = 7;
 
-      let segundosPasados = 0;
-      const intervalo = setInterval(() => {
-        segundosPasados++;
-        setTiempoRestante(TIEMPO_ESPERA - segundosPasados);
-        if (cardVisible && cardContent?.tipo === 'contactando') {
-          setCardContent((prev: any) => ({
-            ...prev,
-            mensaje: `${conductor.driver} (${indiceActual + 1}/${conductoresOrdenados.length})\nEsperando... ${TIEMPO_ESPERA - segundosPasados}s`
-          }));
-        }
-      }, 1000);
-
-      timeoutRef.current = setTimeout(() => {
-        clearInterval(intervalo);
-        
-        const acepta = indiceActual === 1;
-        
-        if (acepta) {
-          setConductorAsignado(conductor);
+      const contactarSiguienteConductor = () => {
+        if (indiceActual >= conductoresOrdenados.length) {
           setBuscandoConductor(false);
-          setTiempoRestante(0);
-          
-          mostrarTarjeta(
-            "✅ Viaje asignado",
-            `${conductor.driver}\n${conductor.plate}\nLlega en ${conductor.etaCalculado} min`,
-            'success',
-            conductor
-          );
-        } else {
-          mostrarTarjeta(
-            "⏳ No disponible",
-            `${conductor.driver} no aceptó`,
-            'info'
-          );
-          indiceActual++;
-          contactarSiguienteConductor();
+          mostrarTarjeta("Lo sentimos", "No hay conductores disponibles", 'error');
+          return;
         }
-      }, TIEMPO_ESPERA * 1000);
-    };
 
-    contactarSiguienteConductor();
+        const conductor = conductoresOrdenados[indiceActual];
+
+        setConductoresContactados(prev => [...prev, conductor.id]);
+
+        mostrarTarjeta(
+          "🔄 Contactando",
+          `${conductor.driver} (${indiceActual + 1}/${conductoresOrdenados.length})`,
+          'contactando',
+          conductor
+        );
+
+        setTiempoRestante(TIEMPO_ESPERA);
+
+        let segundosPasados = 0;
+        const intervalo = setInterval(() => {
+          segundosPasados++;
+          setTiempoRestante(TIEMPO_ESPERA - segundosPasados);
+          if (cardVisible && cardContent?.tipo === 'contactando') {
+            setCardContent((prev: any) => ({
+              ...prev,
+              mensaje: `${conductor.driver} (${indiceActual + 1}/${conductoresOrdenados.length})\nEsperando... ${TIEMPO_ESPERA - segundosPasados}s`
+            }));
+          }
+        }, 1000);
+
+        timeoutRef.current = setTimeout(() => {
+          clearInterval(intervalo);
+
+          // 🔥 IMPORTANTE: Escuchar en Firestore si este conductor aceptó
+          // Creamos un listener para este conductor específico
+          const viajeRef = doc(db, "viajes", docRef.id);
+          const unsubscribe = onSnapshot(viajeRef, (snapshot) => {
+            const viajeData = snapshot.data();
+
+            // Si el conductor aceptó (conductorId tiene el ID de este conductor)
+            if (viajeData?.conductorId === conductor.id && viajeData?.estado === "aceptado") {
+              unsubscribe(); // Limpiamos el listener
+
+              // Limpiar cualquier otro timeout pendiente
+              if (timeoutRef.current) {
+                clearTimeout(timeoutRef.current);
+              }
+              clearInterval(intervalo);
+
+              // Asignar este conductor
+              setConductorAsignado(conductor);
+              setBuscandoConductor(false);
+              setTiempoRestante(0);
+
+              mostrarTarjeta(
+                "✅ Viaje asignado",
+                `${conductor.driver} aceptó el viaje`,
+                'success',
+                conductor
+              );
+            }
+          });
+
+          // Si pasa el tiempo sin que este conductor acepte, pasamos al siguiente
+          const timeoutConductor = setTimeout(() => {
+            unsubscribe(); // Limpiamos el listener
+
+            // Verificar si ya no fue asignado por otro conductor
+            if (!conductorAsignado) {
+              mostrarTarjeta(
+                "⏳ No disponible",
+                `${conductor.driver} no respondió`,
+                'info'
+              );
+              indiceActual++;
+              contactarSiguienteConductor();
+            }
+          }, TIEMPO_ESPERA * 1000);
+
+          // Guardar el timeout para poder cancelarlo después
+          timeoutRef.current = timeoutConductor;
+
+        }, 1000); // Pequeño delay antes de empezar a escuchar
+      };
+
+      contactarSiguienteConductor();
+
+    } catch (error) {
+      console.log("❌ Error creando viaje:", error);
+      mostrarTarjeta("Error", "No se pudo crear el viaje", 'error');
+      setBuscandoConductor(false);
+    }
   };
 
   const cancelarBusqueda = () => {
@@ -481,7 +605,7 @@ export default function MapaScreen() {
       mostrarTarjeta("No disponible", "Ya pasaron los 30 segundos, no puedes cancelar", 'error');
       return;
     }
-    
+
     setConductorAsignado(null);
     setBuscandoConductor(false);
     ocultarTarjeta();
@@ -489,6 +613,12 @@ export default function MapaScreen() {
   };
 
   const handleRequestRide = () => {
+    console.log("🟢🟢🟢 BOTÓN SOLICITAR VIAJE PRESIONADO");
+    console.log("  destination:", destination);
+    console.log("  buscandoConductor:", buscandoConductor);
+    console.log("  conductorAsignado:", conductorAsignado);
+    console.log("  conductoresReales.length:", conductoresReales.length);
+
     if (!destination) {
       mostrarTarjeta("Error", "Selecciona un destino", 'error');
       router.push({
@@ -504,10 +634,11 @@ export default function MapaScreen() {
     }
 
     if (conductorAsignado) {
-      mostrarTarjeta("Asignado", `Conductor: ${conductorAsignado.driver}`, 'success');
+      mostrarTarjeta("✅ Viaje asignado", `Conductor: ${conductorAsignado.driver}`, 'success', conductorAsignado);
       return;
     }
 
+    // 👈 LLAMAR A LA FUNCIÓN EXTERNA (AHORA ASYNC)
     buscarConductorAutomatico();
   };
 
@@ -560,7 +691,7 @@ export default function MapaScreen() {
         </TouchableOpacity>
       </View>
 
-      {/* Mapa - SIN ZOOM AUTOMÁTICO */}
+      {/* Mapa */}
       <View style={styles.mapContainer}>
         <MapView
           ref={mapRef}
@@ -570,9 +701,8 @@ export default function MapaScreen() {
           showsUserLocation={true}
           showsMyLocationButton={true}
           mapType={mapType}
-          // 🚫 SIN fitToCoordinates - el zoom NO cambia automáticamente
         >
-          {nearbyCars.map((car) => (
+          {conductoresReales.map((car) => (
             <Marker
               key={car.id}
               coordinate={{ latitude: car.lat, longitude: car.lng }}
@@ -580,7 +710,7 @@ export default function MapaScreen() {
               opacity={conductoresContactados.includes(car.id) ? 0.5 : 1}
             >
               <View style={[
-                styles.marker, 
+                styles.marker,
                 { backgroundColor: getMarkerColor(car.type) },
                 conductorAsignado?.id === car.id && styles.markerAsignado,
                 conductoresContactados.includes(car.id) && !conductorAsignado && styles.markerContactado
@@ -642,14 +772,26 @@ export default function MapaScreen() {
         </MapView>
       </View>
 
-      {/* Tarjeta flotante MODERNA - estilo iOS/macOS */}
+      {/* Tarjeta flotante MODERNA */}
       {cardVisible && cardContent && (
-        <Animated.View 
+        <Animated.View
           style={[
             styles.floatingCard,
-            cardContent.tipo === 'success' && styles.cardSuccess,
-            cardContent.tipo === 'error' && styles.cardError,
-            cardContent.tipo === 'contactando' && styles.cardContactando,
+            {
+              backgroundColor: cardContent.tipo === 'success'
+                ? `rgba(${hexToRgb(serviceInfo.color)}, 0.30)`
+                : cardContent.tipo === 'error'
+                  ? `rgba(${hexToRgb(serviceInfo.color)}, 0.30)`
+                  : cardContent.tipo === 'contactando'
+                    ? `rgba(${hexToRgb(serviceInfo.color)}, 0.30)`
+                    : `rgba(${hexToRgb(serviceInfo.color)}, 0.30)`,
+              borderColor: cardContent.tipo === 'success'
+                ? '#4CAF50'
+                : cardContent.tipo === 'error'
+                  ? '#FF3B30'
+                  : serviceInfo.color,
+              borderWidth: 1,
+            },
             cardMinimized && styles.cardMinimized,
             {
               transform: [
@@ -666,39 +808,55 @@ export default function MapaScreen() {
             <View>
               <View style={styles.cardHeader}>
                 <View style={styles.cardHeaderLeft}>
-                  {cardContent.tipo === 'success' && <Ionicons name="checkmark-circle" size={20} color="#4CAF50" />}
-                  {cardContent.tipo === 'error' && <Ionicons name="alert-circle" size={20} color="#FF3B30" />}
-                  {cardContent.tipo === 'contactando' && <Ionicons name="sync" size={20} color="#007AFF" />}
-                  {cardContent.tipo === 'info' && <Ionicons name="information-circle" size={20} color="#007AFF" />}
-                  <Text style={styles.cardTitle} numberOfLines={1}>
-                    {cardMinimized ? '📌' : cardContent.titulo}
+                  <View style={[styles.cardIconContainer, { backgroundColor: serviceInfo.color }]}>
+                    {cardContent.tipo === 'success' && <Ionicons name="checkmark-circle" size={18} color="#fff" />}
+                    {cardContent.tipo === 'error' && <Ionicons name="alert-circle" size={18} color="#fff" />}
+                    {cardContent.tipo === 'contactando' && <Ionicons name="sync" size={18} color="#fff" />}
+                    {cardContent.tipo === 'info' && <Ionicons name="information-circle" size={18} color="#fff" />}
+                  </View>
+                  <Text style={[styles.cardTitle, {
+                    color: '#000',
+                    fontWeight: '800',
+                    textShadowColor: 'rgba(255, 255, 255, 0.5)',
+                    textShadowOffset: { width: 0, height: 1 },
+                    textShadowRadius: 2
+                  }]} numberOfLines={1}>
+                    {cardMinimized ? '' : cardContent.titulo}
                   </Text>
                 </View>
                 <View style={styles.cardHeaderRight}>
-                  <TouchableOpacity onPress={toggleMinimizar} style={styles.cardIconButton}>
-                    <Ionicons 
-                      name={cardMinimized ? "expand" : "contract"} 
-                      size={18} 
-                      color="#666" 
+                  <TouchableOpacity onPress={toggleMinimizar} style={[styles.cardIconButton, { backgroundColor: 'rgba(255,255,255,0.5)' }]}>
+                    <Ionicons
+                      name={cardMinimized ? "expand" : "contract"}
+                      size={18}
+                      color={serviceInfo.color}
                     />
                   </TouchableOpacity>
-                  <TouchableOpacity onPress={ocultarTarjeta} style={styles.cardIconButton}>
-                    <Ionicons name="close" size={18} color="#666" />
+                  <TouchableOpacity onPress={ocultarTarjeta} style={[styles.cardIconButton, { backgroundColor: 'rgba(255,255,255,0.5)' }]}>
+                    <Ionicons name="close" size={18} color={serviceInfo.color} />
                   </TouchableOpacity>
                 </View>
               </View>
 
               {!cardMinimized && (
                 <>
-                  <Text style={styles.cardMessage}>{cardContent.mensaje}</Text>
-                  
+                  {cardContent.tipo !== 'success' && (  // ← No mostrar mensaje si es success
+                    <Text style={[styles.cardMessage, {
+                      color: '#000',
+                      fontWeight: '600',
+                      textShadowColor: 'rgba(255, 255, 255, 0.5)',
+                      textShadowOffset: { width: 0, height: 1 },
+                      textShadowRadius: 2
+                    }]}>{cardContent.mensaje}</Text>
+                  )}
+
                   {cardContent.tipo === 'contactando' && (
                     <>
                       <View style={styles.progressBar}>
-                        <View style={[styles.progressFill, { width: `${((7 - tiempoRestante) / 7) * 100}%` }]} />
+                        <View style={[styles.progressFill, { width: `${((7 - tiempoRestante) / 7) * 100}%`, backgroundColor: serviceInfo.color }]} />
                       </View>
-                      <TouchableOpacity 
-                        style={styles.cardButton}
+                      <TouchableOpacity
+                        style={[styles.cardButton, { backgroundColor: serviceInfo.color }]}
                         onPress={cancelarBusqueda}
                       >
                         <Text style={styles.cardButtonText}>Cancelar</Text>
@@ -709,14 +867,37 @@ export default function MapaScreen() {
                   {cardContent.tipo === 'success' && cardContent.conductor && (
                     <>
                       <View style={styles.conductorInfo}>
-                        <Text style={styles.conductorPlate}>{cardContent.conductor.plate}</Text>
-                        <Text style={styles.conductorEta}>⏱️ {cardContent.conductor.etaCalculado} min</Text>
+                        <View style={styles.conductorDetails}>
+                          {/* ✅ NOMBRE DEL CONDUCTOR AGREGADO */}
+                          <Text style={styles.conductorName}>
+                            {cardContent.conductor.driver}
+                          </Text>
+
+                          <Text style={[styles.conductorPlate, {
+                            color: '#000',
+                            fontWeight: '700',
+                            textShadowColor: 'rgba(255, 255, 255, 0.5)',
+                            textShadowOffset: { width: 0, height: 1 },
+                            textShadowRadius: 2
+                          }]}>{cardContent.conductor.plate}</Text>
+
+                          <View style={styles.vehicleDetails}>
+                            <Text style={styles.vehicleText}>
+                              {cardContent.conductor.marca || 'Toyota'} {cardContent.conductor.modelo || 'Corolla'}
+                            </Text>
+                            <Text style={[styles.vehicleColor, { color: cardContent.conductor.color?.toLowerCase() || '#666' }]}>
+                              Color: {cardContent.conductor.color || 'Blanco'}
+                            </Text>
+                          </View>
+                        </View>
+
+                        <View style={styles.etaContainer}>
+                          <Text style={styles.conductorEta}>⏱️ {cardContent.conductor.etaCalculado} min</Text>
+                        </View>
                       </View>
-                      
-                      {/* Botón de cancelar viaje con temporizador de 30 segundos */}
                       {puedeCancelar && (
-                        <TouchableOpacity 
-                          style={styles.cancelRideButton}
+                        <TouchableOpacity
+                          style={[styles.cancelRideButton, { backgroundColor: serviceInfo.color }]}
                           onPress={cancelarViaje}
                         >
                           <Ionicons name="close-circle" size={20} color="#fff" />
@@ -730,17 +911,19 @@ export default function MapaScreen() {
 
                   <View style={styles.dragIndicator}>
                     <Ionicons name="menu" size={14} color="#999" />
-                    <Text style={styles.dragText}>Arrastra para mover</Text>
+                    <Text style={[styles.dragText, { color: '#999' }]}>Arrastra para mover</Text>
                   </View>
                 </>
               )}
 
               {cardMinimized && (
                 <View style={styles.minimizedContent}>
-                  {cardContent.tipo === 'success' && <Ionicons name="checkmark-circle" size={24} color="#4CAF50" />}
-                  {cardContent.tipo === 'error' && <Ionicons name="alert-circle" size={24} color="#FF3B30" />}
-                  {cardContent.tipo === 'contactando' && <Ionicons name="sync" size={24} color="#007AFF" />}
-                  {cardContent.tipo === 'info' && <Ionicons name="information-circle" size={24} color="#007AFF" />}
+                  <View style={[styles.minimizedIconContainer, { backgroundColor: serviceInfo.color }]}>
+                    {cardContent.tipo === 'success' && <Ionicons name="checkmark-circle" size={24} color="#fff" />}
+                    {cardContent.tipo === 'error' && <Ionicons name="alert-circle" size={24} color="#fff" />}
+                    {cardContent.tipo === 'contactando' && <Ionicons name="sync" size={24} color="#fff" />}
+                    {cardContent.tipo === 'info' && <Ionicons name="information-circle" size={24} color="#fff" />}
+                  </View>
                 </View>
               )}
             </View>
@@ -778,7 +961,7 @@ export default function MapaScreen() {
           </Text>
         </TouchableOpacity>
 
-        {/* Botón de cancelar viaje (solo visible durante búsqueda) */}
+        {/* Botón de cancelar viaje */}
         {buscandoConductor && (
           <TouchableOpacity
             style={styles.cancelSearchButton}
@@ -846,29 +1029,59 @@ export default function MapaScreen() {
               </Text>
             </View>
 
-            <View style={styles.currencyContainer}>
-              {Object.keys(currencySymbols).map((curr) => (
-                <TouchableOpacity
-                  key={curr}
-                  style={[
-                    styles.currencyButton,
-                    selectedCurrency === curr && styles.currencyActive
-                  ]}
-                  onPress={() => setSelectedCurrency(curr as any)}
-                >
-                  <Text style={[
-                    styles.currencyText,
-                    selectedCurrency === curr && styles.currencyTextActive
-                  ]}>
-                    {currencySymbols[curr as keyof typeof currencySymbols]} {curr}
-                  </Text>
-                </TouchableOpacity>
-              ))}
+            {/* Selector de moneda de pago */}
+            <View style={styles.paymentCurrencyContainer}>
+              <Text style={styles.paymentCurrencyLabel}>Seleccione moneda de pago:</Text>
+              <View style={styles.paymentCurrencySelector}>
+                {Object.keys(currencySymbols).map((curr) => (
+                  <TouchableOpacity
+                    key={curr}
+                    style={[
+                      styles.paymentCurrencyButton,
+                      selectedCurrency === curr && styles.paymentCurrencyActive
+                    ]}
+                    onPress={() => setSelectedCurrency(curr as 'BRL' | 'PYG' | 'USD')}
+                  >
+                    <Text style={[
+                      styles.paymentCurrencyText,
+                      selectedCurrency === curr && styles.paymentCurrencyTextActive
+                    ]}>
+                      {currencySymbols[curr as keyof typeof currencySymbols]} {curr}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
             </View>
-
+            <View style={styles.paymentMethodContainer}>
+              <Text style={styles.paymentMethodLabel}>Forma de pago:</Text>
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                style={styles.paymentMethodScroll}
+              >
+                {metodosPago.map((metodo) => (
+                  <TouchableOpacity
+                    key={metodo.id}
+                    style={[
+                      styles.paymentMethodButton,
+                      selectedMetodoPago === metodo.id && styles.paymentMethodActive
+                    ]}
+                    onPress={() => setSelectedMetodoPago(metodo.id)}
+                  >
+                    <Text style={styles.paymentMethodIcon}>{metodo.icon}</Text>
+                    <Text style={[
+                      styles.paymentMethodText,
+                      selectedMetodoPago === metodo.id && styles.paymentMethodTextActive
+                    ]}>
+                      {metodo.label}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            </View>
             <TouchableOpacity
               style={[
-                styles.requestButton, 
+                styles.requestButton,
                 { backgroundColor: serviceInfo.color },
                 (buscandoConductor || conductorAsignado) && styles.requestButtonDisabled
               ]}
@@ -876,9 +1089,9 @@ export default function MapaScreen() {
               disabled={buscandoConductor}
             >
               <Text style={styles.requestButtonText}>
-                {buscandoConductor ? 'BUSCANDO...' : 
-                 conductorAsignado ? 'VIAJE ASIGNADO' : 
-                 'SOLICITAR VIAJE'}
+                {buscandoConductor ? 'BUSCANDO...' :
+                  conductorAsignado ? 'VIAJE ASIGNADO' :
+                    'SOLICITAR VIAJE'}
               </Text>
             </TouchableOpacity>
           </View>
@@ -1075,7 +1288,6 @@ const styles = StyleSheet.create({
     color: '#666',
     flex: 1,
   },
-  // Botón de cancelar búsqueda (fuera de la tarjeta)
   cancelSearchButton: {
     flexDirection: 'row',
     backgroundColor: '#FF3B30',
@@ -1091,14 +1303,12 @@ const styles = StyleSheet.create({
     shadowRadius: 4,
     elevation: 3,
   },
-  // Tarjeta flotante MODERNA - estilo iOS/macOS
   floatingCard: {
     position: 'absolute',
     top: 120,
     left: 20,
     right: 20,
-    backgroundColor: 'rgba(255, 255, 255, 0.85)', // Más transparente
-    borderRadius: 24, // Más redondeado
+    borderRadius: 24,
     padding: 16,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 10 },
@@ -1106,9 +1316,7 @@ const styles = StyleSheet.create({
     shadowRadius: 20,
     elevation: 10,
     zIndex: 20,
-    borderWidth: 0.5,
-    borderColor: 'rgba(255, 255, 255, 0.3)',
-    backdropFilter: 'blur(20px)', // Efecto blur (en iOS)
+    borderWidth: 1,
   },
   cardMinimized: {
     width: 70,
@@ -1117,22 +1325,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     padding: 10,
-    backgroundColor: 'rgba(255, 255, 255, 0.9)',
-  },
-  cardSuccess: {
-    borderLeftWidth: 0,
-    borderTopWidth: 3,
-    borderTopColor: '#4CAF50',
-  },
-  cardError: {
-    borderLeftWidth: 0,
-    borderTopWidth: 3,
-    borderTopColor: '#FF3B30',
-  },
-  cardContactando: {
-    borderLeftWidth: 0,
-    borderTopWidth: 3,
-    borderTopColor: '#007AFF',
   },
   cardHeader: {
     flexDirection: 'row',
@@ -1146,6 +1338,14 @@ const styles = StyleSheet.create({
     gap: 8,
     flex: 1,
   },
+  cardIconContainer: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 8,
+  },
   cardHeaderRight: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1153,24 +1353,28 @@ const styles = StyleSheet.create({
   },
   cardIconButton: {
     padding: 6,
-    backgroundColor: 'rgba(0,0,0,0.05)',
     borderRadius: 20,
   },
   cardTitle: {
     fontSize: 16,
     fontWeight: '600',
-    color: '#333',
     flex: 1,
+    color: '#333', // Color más oscuro
+    textShadowColor: 'rgba(255, 255, 255, 0.8)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
   },
   cardMessage: {
     fontSize: 14,
-    color: '#555',
+    color: '#333', // Color más oscuro
     lineHeight: 20,
     marginBottom: 16,
-    fontWeight: '400',
+    fontWeight: '600',
+    textShadowColor: 'rgba(255, 255, 255, 0.8)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
   },
   cardButton: {
-    backgroundColor: '#FF3B30',
     paddingVertical: 12,
     paddingHorizontal: 16,
     borderRadius: 30,
@@ -1183,10 +1387,8 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
   },
-  // Botón de cancelar viaje dentro de la tarjeta
   cancelRideButton: {
     flexDirection: 'row',
-    backgroundColor: '#FF3B30',
     paddingVertical: 12,
     paddingHorizontal: 16,
     borderRadius: 30,
@@ -1212,7 +1414,6 @@ const styles = StyleSheet.create({
   },
   dragText: {
     fontSize: 12,
-    color: '#999',
     marginLeft: 6,
     fontWeight: '400',
   },
@@ -1225,7 +1426,6 @@ const styles = StyleSheet.create({
   },
   progressFill: {
     height: '100%',
-    backgroundColor: '#007AFF',
   },
   conductorInfo: {
     flexDirection: 'row',
@@ -1238,18 +1438,35 @@ const styles = StyleSheet.create({
   },
   conductorPlate: {
     fontSize: 16,
-    fontWeight: '600',
-    color: '#333',
+    fontWeight: '700',
+    color: '#000', // Negro sólido
+    backgroundColor: 'rgba(255, 255, 255, 0.7)', // Fondo semi-transparente
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 4,
+    alignSelf: 'flex-start',
   },
   conductorEta: {
     fontSize: 14,
-    color: '#666',
+    color: '#333',
     fontWeight: '500',
+    backgroundColor: 'rgba(255, 255, 255, 0.7)',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+    overflow: 'hidden',
   },
   minimizedContent: {
     alignItems: 'center',
     justifyContent: 'center',
     height: 40,
+  },
+  minimizedIconContainer: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   compactIndicator: {
     flexDirection: 'row',
@@ -1396,5 +1613,135 @@ const styles = StyleSheet.create({
   },
   menuTextActive: {
     color: '#007AFF',
+  },
+  conductorDetails: {
+    flex: 1,
+    marginRight: 10,
+  },
+  vehicleDetails: {
+    marginTop: 4,
+  },
+  vehicleText: {
+    fontSize: 14,
+    color: '#333',
+    fontWeight: '500',
+    backgroundColor: 'rgba(255, 255, 255, 0.7)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    marginBottom: 2,
+  },
+  vehicleColor: {
+    fontSize: 12,
+    marginTop: 2,
+    fontWeight: '400',
+    color: '#666',
+    backgroundColor: 'rgba(255, 255, 255, 0.7)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    alignSelf: 'flex-start',
+  },
+  etaContainer: {
+    alignItems: 'flex-end',
+    justifyContent: 'center',
+  },
+  conductorName: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: '#000',
+    marginBottom: 8,
+    alignSelf: 'flex-start', // Para que el fondo se ajuste al texto
+    backgroundColor: 'rgba(255, 255, 255, 0.7)', // Fondo blanco semitransparente
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+    textShadowColor: 'rgba(255, 255, 255, 0.5)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
+    overflow: 'hidden',
+  },
+  paymentCurrencyContainer: {
+    marginTop: 10,
+    marginBottom: 15,
+    paddingHorizontal: 15,
+  },
+  paymentCurrencyLabel: {
+    fontSize: 14,
+    color: '#666',
+    marginBottom: 8,
+    fontWeight: '500',
+  },
+  paymentCurrencySelector: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    backgroundColor: '#fff',
+    borderRadius: 25,
+    padding: 4,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  paymentCurrencyButton: {
+    flex: 1,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 21,
+    alignItems: 'center',
+  },
+  paymentCurrencyActive: {
+    backgroundColor: '#007AFF',
+  },
+  paymentCurrencyText: {
+    fontSize: 14,
+    color: '#333',
+    fontWeight: '500',
+  },
+  paymentCurrencyTextActive: {
+    color: '#fff',
+    fontWeight: '600',
+  },
+  paymentMethodContainer: {
+    marginTop: 10,
+    marginBottom: 15,
+    paddingHorizontal: 15,
+  },
+  paymentMethodLabel: {
+    fontSize: 14,
+    color: '#666',
+    marginBottom: 8,
+    fontWeight: '500',
+  },
+  paymentMethodScroll: {
+    flexDirection: 'row',
+  },
+  paymentMethodButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#f0f0f0',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 25,
+    marginRight: 10,
+    borderWidth: 1,
+    borderColor: '#e0e0e0',
+  },
+  paymentMethodActive: {
+    backgroundColor: '#007AFF',
+    borderColor: '#007AFF',
+  },
+  paymentMethodIcon: {
+    fontSize: 16,
+    marginRight: 6,
+  },
+  paymentMethodText: {
+    fontSize: 14,
+    color: '#333',
+    fontWeight: '500',
+  },
+  paymentMethodTextActive: {
+    color: '#fff',
   },
 });

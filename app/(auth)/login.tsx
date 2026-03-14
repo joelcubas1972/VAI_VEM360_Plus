@@ -30,23 +30,67 @@ export default function LoginScreen() {
 
     setLoading(true);
     try {
+      // ✅ PASO 1: Autenticar (esto funciona)
       const userCredential = await signInWithEmailAndPassword(auth, email, password);
+      const uid = userCredential.user.uid;
+      console.log("✅ Usuario autenticado:", uid);
 
-      // Obtener datos del usuario desde Firestore
-      const userSnap = await getDoc(doc(db, "usuarios", userCredential.user.uid));
-      const userData = userSnap.exists() ? userSnap.data() : null;
+      // ✅ PASO 2: Intentar obtener rol de Firestore (con manejo de errores)
+      try {
+        console.log("🔍 Buscando usuario en Firestore con UID:", uid);
 
-      // Verificar si la cuenta está verificada
-      if (!userData?.verified) {
-        Alert.alert("Verificación", "Debes verificar tu cuenta antes de entrar. Revisa tu email.");
-        setLoading(false);
-        return;
+        // 1️⃣ Primero buscar en CONDUCTORES
+        const conductorSnap = await getDoc(doc(db, "conductores", uid));
+        
+        if (conductorSnap.exists()) {
+          // ✅ Es CONDUCTOR
+          const conductorData = conductorSnap.data();
+          console.log("👤 Es CONDUCTOR, verified:", conductorData?.verified);
+          
+          if (!conductorData?.verified) {
+            Alert.alert("Verificación", "Debes verificar tu cuenta antes de entrar. Revisa tu email.");
+            setLoading(false);
+            return;
+          }
+
+          console.log("🚗 Redirigiendo a dashboard de conductor");
+          router.replace("/conductor/dashboard");
+          setLoading(false);
+          return;
+        }
+
+        // 2️⃣ Si no es conductor, buscar en USUARIOS
+        const userSnap = await getDoc(doc(db, "usuarios", uid));
+        
+        if (userSnap.exists()) {
+          // ✅ Es USUARIO
+          const userData = userSnap.data();
+          console.log("👤 Es USUARIO, verified:", userData?.verified);
+          
+          if (!userData?.verified) {
+            Alert.alert("Verificación", "Debes verificar tu cuenta antes de entrar. Revisa tu email.");
+            setLoading(false);
+            return;
+          }
+
+          console.log("🗺️ Redirigiendo a servicios");
+          router.replace("/(tabs)/servicios");
+          setLoading(false);
+          return;
+        }
+
+        // 3️⃣ Si no está en ninguna colección
+        console.log("❌ Usuario no encontrado en Firestore");
+        Alert.alert("Error", "Usuario no encontrado en la base de datos");
+        
+      } catch (firestoreError: any) {
+        // 🔥 SI FIRESTORE FALLA (offline), ASUMIMOS QUE ES USUARIO NORMAL
+        console.log("⚠️ Firestore offline, redirigiendo a servicios por defecto");
+        router.replace("/(tabs)/servicios");
       }
-
-      // Redirigir según el rol (ambos van a tabs por ahora)
-      router.replace("/(tabs)/servicios");
       
     } catch (error: any) {
+      console.log("❌ Error en login:", error.message);
       Alert.alert("Error", error.message || "No se pudo iniciar sesión");
     } finally {
       setLoading(false);
